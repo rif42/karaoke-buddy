@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Spike (local, self-contained)</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; background: #121016; color: #f4f1fa; margin: 0; }
+  main { max-width: 640px; margin: 0 auto; padding: 24px 16px 48px; }
+  input { width: 100%; background: #100e14; color: #fff; border: 1px solid #38324a;
+          border-radius: 10px; padding: 12px; font-size: .95rem; margin: 6px 0; box-sizing: border-box; }
+  button { background: #8b5cf6; color: #fff; border: 0; border-radius: 10px;
+           padding: 14px; font-size: 1.05rem; font-weight: 700; width: 100%; cursor: pointer; margin-top: 10px; }
+  button:disabled { opacity: .5; }
+  .row { display: flex; gap: 8px; } .row button { width: auto; padding: 12px 18px; }
+  .meta { color: #a79fb8; font-size: .9rem; margin: 10px 0; }
+  .song { display: flex; gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid #2a2534; }
+  .song img { width: 44px; height: 44px; border-radius: 6px; background: #2a2534; }
+  .song .t { font-weight: 600; } .song .a { color: #a79fb8; font-size: .9rem; }
+  .err { color: #f87171; } .ok { color: #34d399; }
+  pre.diag { background: #100e14; border: 1px solid #38324a; border-radius: 10px;
+             padding: 10px; font-size: .75rem; overflow-x: auto; white-space: pre-wrap; }
+  .hint { color: #a79fb8; font-size: .85rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>🎤 Spike (local)</h1>
+  <p class="hint">Self-contained: no app.js, no styles.css, no rooms. One GET to <code>/api/tracks</code>.
+  Open via <code>npx serve</code> / Live Server (needs http:// for fetch). Hard-refresh (Ctrl+Shift+R) to bust cache.</p>
+  <label>Worker URL</label>
+  <input id="worker" value="https://karaoke-buddy.rif42.workers.dev" />
+  <label>Playlist URL or ID</label>
+  <input id="playlist" value="https://open.spotify.com/playlist/4RiOBZIhsahgJrFMcivXwL" />
+  <button id="go">Go</button>
+  <p id="meta" class="meta"></p>
+  <pre id="diag" class="diag" style="display:none"></pre>
+  <div id="list"></div>
+</main>
+<script>
+(function () {
+  "use strict";
+  function $(id) { return document.getElementById(id); }
+  function extractId(url) {
+    var m = String(url || "").trim().match(/(?:open\.spotify\.com\/playlist\/|spotify:playlist:|^)([A-Za-z0-9]{22})/);
+    return m ? m[1] : null;
+  }
+  $("go").onclick = function () {
+    var W = $("worker").value.trim().replace(/\/+$/, "");
+    var pid = extractId($("playlist").value);
+    var meta = $("meta"), list = $("list"), diag = $("diag");
+    list.innerHTML = ""; diag.style.display = "none"; diag.textContent = "";
+    if (!pid) { meta.innerHTML = '<span class="err">Not a playlist URL/ID.</span>'; return; }
+    meta.textContent = "Loading " + pid + " …";
+    fetch(W + "/api/tracks?pid=" + encodeURIComponent(pid) + "&t=" + Date.now())
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; }); })
+      .then(function (r) {
+        diag.style.display = "block";
+        diag.textContent = JSON.stringify({ http: r.status, meta: {
+          name: r.body.name, trackCount: r.body.trackCount, capped: r.body.capped,
+          endpointUsed: r.body.endpointUsed, shapeUsed: r.body.shapeUsed,
+          metaTotal: r.body.metaTotal, pageShape: r.body.pageShape,
+          code: r.body.code, message: r.body.message
+        } }, null, 1);
+        if (!r.ok) {
+          meta.innerHTML = '<span class="err">❌ HTTP ' + r.status + " " + (r.body.code || "") +
+            ": " + (r.body.message || "failed") + "</span>";
+          return;
+        }
+        var tracks = r.body.tracks || [];
+        meta.innerHTML = '<span class="ok">✅ ' + (r.body.name || "Playlist") + " — " + tracks.length +
+          " songs</span> · via /" + (r.body.endpointUsed || "?") + " · shape " + (r.body.shapeUsed || "?");
+        tracks.forEach(function (t, i) {
+          var row = document.createElement("div"); row.className = "song";
+          if (t.image) { var img = document.createElement("img"); img.src = t.image; img.alt = ""; row.appendChild(img); }
+          var d = document.createElement("div");
+          var tt = document.createElement("div"); tt.className = "t"; tt.textContent = (i + 1) + ". " + t.title; d.appendChild(tt);
+          var aa = document.createElement("div"); aa.className = "a"; aa.textContent = (t.artists || []).join(", "); d.appendChild(aa);
+          row.appendChild(d); list.appendChild(row);
+        });
+      })
+      .catch(function (e) { meta.innerHTML = '<span class="err">❌ network: ' + e.message + "</span>"; });
+  };
+})();
+</script>
+</body>
+</html>

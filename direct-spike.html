@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Spike DIRECT — browser → Spotify, no worker</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; background: #121016; color: #f4f1fa; margin: 0; }
+  main { max-width: 680px; margin: 0 auto; padding: 24px 16px 48px; }
+  input { width: 100%; background: #100e14; color: #fff; border: 1px solid #38324a;
+          border-radius: 10px; padding: 12px; font-size: .9rem; margin: 6px 0; box-sizing: border-box; }
+  button { background: #8b5cf6; color: #fff; border: 0; border-radius: 10px;
+           padding: 14px; font-size: 1.05rem; font-weight: 700; width: 100%; cursor: pointer; margin-top: 10px; }
+  button:disabled { opacity: .5; }
+  .meta { color: #a79fb8; font-size: .9rem; margin: 10px 0; }
+  .song { display: flex; gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid #2a2534; }
+  .song img { width: 44px; height: 44px; border-radius: 6px; background: #2a2534; }
+  .song .t { font-weight: 600; } .song .a { color: #a79fb8; font-size: .9rem; }
+  .log div { padding: 8px 10px; border-radius: 8px; background: #1c1922; margin: 6px 0; font-size: .85rem; }
+  .pass { border-left: 5px solid #34d399; } .fail { border-left: 5px solid #f87171; }
+  .warn { border-left: 5px solid #fbbf24; } .run { border-left: 5px solid #8b5cf6; }
+  .hint { color: #a79fb8; font-size: .85rem; }
+  code { background: #2a2534; padding: 1px 6px; border-radius: 4px; font-size: .85em; }
+</style>
+</head>
+<body>
+<main>
+  <h1>🎤 Spike DIRECT (no worker)</h1>
+  <p class="hint">Browser → Spotify only. Works from <code>file://</code>. Paste credentials + playlist, hit Go.
+  Secrets stay in this page (never sent anywhere except Spotify). For local testing only.</p>
+  <label>Client ID</label>
+  <input id="cid" value="ec7e26a929af442da224dc64e1a60ef8" />
+  <label>Client Secret</label>
+  <input id="csec" type="password" placeholder="paste client secret" />
+  <label>Playlist URL or ID</label>
+  <input id="playlist" value="https://open.spotify.com/playlist/4RiOBZIhsahgJrFMcivXwL" />
+  <button id="go">Go</button>
+  <div id="log" class="log"></div>
+  <p id="meta" class="meta"></p>
+  <div id="list"></div>
+</main>
+<script>
+(function () {
+  "use strict";
+  function $(id) { return document.getElementById(id); }
+  function step(cls, html) {
+    var d = document.createElement("div"); d.className = cls; d.innerHTML = html;
+    $("log").appendChild(d); return d;
+  }
+  function extractId(url) {
+    var m = String(url || "").trim().match(/(?:open\.spotify\.com\/playlist\/|spotify:playlist:|^)([A-Za-z0-9]{22})/);
+    return m ? m[1] : null;
+  }
+  $("go").onclick = async function () {
+    $("log").innerHTML = ""; $("list").innerHTML = ""; $("meta").textContent = "";
+    this.disabled = true;
+    var cid = $("cid").value.trim(), csec = $("csec").value.trim();
+    var pid = extractId($("playlist").value);
+    if (!cid || !csec) { step("fail", "❌ Need client ID + secret."); this.disabled = false; return; }
+    if (!pid) { step("fail", "❌ Not a playlist URL/ID."); this.disabled = false; return; }
+    try {
+      // ① token (note: accounts.spotify.com historically lacks CORS headers —
+      // if THIS fails with a CORS error, that itself is the answer: browsers
+      // cannot mint app tokens, worker/proxy is mandatory)
+      var s1 = step("run", "① POST accounts.spotify.com/api/token (client credentials)…");
+      var token;
+      try {
+        var tr = await fetch("https://accounts.spotify.com/api/token", {
+          method: "POST",
+          headers: { "Authorization": "Basic " + btoa(cid + ":" + csec),
+                     "Content-Type": "application/x-www-form-urlencoded" },
+          body: "grant_type=client_credentials"
+        });
+        var tj = await tr.json();
+        if (!tr.ok || !tj.access_token) throw new Error("HTTP " + tr.status + ": " + JSON.stringify(tj));
+        token = tj.access_token;
+        s1.className = "pass"; s1.innerHTML += "<br>✅ token ok (expires_in=" + tj.expires_in + ")";
+      } catch (e) {
+        s1.className = "fail";
+        s1.innerHTML += "<br>❌ " + e.message +
+          "<br>↳ If this is a CORS error (Failed to fetch): browsers are BLOCKED from minting app tokens — a proxy/worker is mandatory, not optional. Use <code>npx wrangler dev</code> instead.";
+        this.disabled = false; return;
+      }
+      var H = { "Authorization": "Bearer " + token };
+      async function get(path) {
+        var r = await fetch("https://api.spotify.com" + path, { headers: H });
+        var j = await r.json().catch(function () { return null; });
+        return { status: r.status, body: j };
+      }
+      // ② meta (both shapes)
+      var s2 = step("run", "② GET /v1/playlists/" + pid + " (meta, tracks+items totals)…");
+      var meta = await get("/v1/playlists/" + pid + "?fields=name,public,owner(id,display_name),tracks(total),items(total)");
+      if (meta.status !== 200) {
+        s2.className = "fail";
+        s2.innerHTML += "<br>❌ HTTP " + meta.status + ": " + JSON.stringify(meta.body);
+        this.disabled = false; return;
+      }
+      var m = meta.body;
+      var total = (m.items && m.items.total != null) ? m.items.total
+        : (m.tracks && m.tracks.total != null) ? m.tracks.total : 0;
+      s2.className = "pass";
+      s2.innerHTML += "<br>✅ <b>" + m.name + "</b> · public=" + m.public +
+        " · tracks.total=" + JSON.stringify(m.tracks && m.tracks.total) +
+        " · items.total=" + JSON.stringify(m.items && m.items.total) +
+        (total === 0 ? '<br>⚠️ BOTH totals missing/zero — page fetch will decide (meta-only vs renamed).' : "");
+      // ③ pages: try /items then /tracks, both shapes, raw keys shown
+      var F = "items(item(id,name,artists(name),album(images),duration_ms,explicit,external_ids(isrc),is_local),track(id,name,artists(name),album(images),duration_ms,explicit,external_ids(isrc),is_local)),next,total,limit,offset";
+      var tracks = [], offset = 0, pages = 0, epUsed = null, shapeUsed = null, rawKeys = null;
+      var maxPages = Math.max(1, Math.ceil(Math.min(total, 500) / 100));
+      while (pages < maxPages) {
+        var s3 = step("run", "③ page offset=" + offset + " — trying /items then /tracks…");
+        var page = null;
+        var ri = await get("/v1/playlists/" + pid + "/items?limit=100&offset=" + offset + "&fields=" + encodeURIComponent(F));
+        if (ri.status === 200) { page = ri.body; epUsed = epUsed || "items"; }
+        else {
+          var rt = await get("/v1/playlists/" + pid + "/tracks?limit=100&offset=" + offset + "&fields=" + encodeURIComponent(F));
+          if (rt.status === 200) { page = rt.body; epUsed = epUsed || "tracks"; }
+          else { s3.className = "fail"; s3.innerHTML += "<br>❌ /items=" + ri.status + " /tracks=" + rt.status + " " + JSON.stringify((rt.body||ri.body)); break; }
+        }
+        pages++;
+        if (pages === 1 && page) rawKeys = Object.keys(page);
+        var entries = (page.items && page.items.items) || page.items || [];
+        s3.className = "pass";
+        s3.innerHTML += "<br>✅ " + entries.length + " entries · keys=" + JSON.stringify(rawKeys);
+        entries.forEach(function (it) {
+          var t = it && (it.item || it.track);
+          if (!shapeUsed && t) shapeUsed = it.item ? "item" : "track";
+          if (!t || t.is_local) return;
+          tracks.push({ title: t.name, artists: (t.artists || []).map(function (a) { return a.name; }),
+            image: (t.album && t.album.images && t.album.images[2] && t.album.images[2].url) || null,
+            isrc: (t.external_ids && t.external_ids.isrc) || null });
+        });
+        if (!page.next) break;
+        offset += 100;
+        if (pages > 6) break;
+      }
+      // ④ verdict
+      $("meta").innerHTML = tracks.length
+        ? "✅ <b>" + tracks.length + " songs</b> · via /" + epUsed + " · shape " + shapeUsed
+        : "❌ <b>0 songs.</b> meta.total=" + total + " · rawKeys=" + JSON.stringify(rawKeys) +
+          " — paste this whole log back.";
+      tracks.forEach(function (t, i) {
+        var row = document.createElement("div"); row.className = "song";
+        if (t.image) { var img = document.createElement("img"); img.src = t.image; img.alt = ""; row.appendChild(img); }
+        var d = document.createElement("div");
+        var tt = document.createElement("div"); tt.className = "t"; tt.textContent = (i + 1) + ". " + t.title; d.appendChild(tt);
+        var aa = document.createElement("div"); aa.className = "a"; aa.textContent = t.artists.join(", "); d.appendChild(aa);
+        row.appendChild(d); $("list").appendChild(row);
+      });
+    } catch (e) {
+      step("fail", "❌ " + e.message);
+    }
+    this.disabled = false;
+  };
+})();
+</script>
+</body>
+</html>

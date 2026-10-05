@@ -1,0 +1,37 @@
+# Karaoke Consensus — Cloudflare wiring (free tier)
+name = "karaoke-buddy"
+main = "worker.js"
+compatibility_date = "2026-09-01"
+workers_dev = true
+preview_urls = false
+
+# KV namespace for rooms (karaoke-buddy)
+[[kv_namespaces]]
+binding = "ROOMS"
+id = "63697454046f49df9899a59f7bb1bc59"
+
+[vars]
+# Public Pages origin allowed to call the worker (tighten after deploy).
+# The worker itself always returns Access-Control-Allow-Origin: * (party phones = any origin).
+MAX_PLAYLISTS = "5"
+ROOM_TTL_SECONDS = "14400"
+# Where guests land after Spotify OAuth (no trailing slash). MUST be set to the
+# Pages deployment URL. The callback redirects to PAGES_ORIGIN/?room=CODE&guest=ID.
+# Example: PAGES_ORIGIN = "https://karaoke-buddy.pages.dev"
+PAGES_ORIGIN = ""
+
+# Secrets (NEVER commit): set with:
+#   wrangler secret put SPOTIFY_CLIENT_ID
+#   wrangler secret put SPOTIFY_CLIENT_SECRET
+# Spotify dashboard setup (PLAN B, required):
+#   1. App settings -> Redirect URIs: ADD https://karaoke-buddy.rif42.workers.dev/api/auth/callback
+#   2. User Management -> ADD each guest's Spotify account email (max 5, Dev Mode allowlist)
+#   3. Owner account must keep Spotify Premium active (Dev Mode requirement)
+
+# Deploy:
+#   1. npm i -g wrangler && wrangler login
+#   2. KV already bound (karaoke-buddy: 63697454046f49df9899a59f7bb1bc59)
+#   3. wrangler secret put SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET   (production only; local dev uses .dev.vars)
+#   4. wrangler deploy                      (worker live)
+#   5. Cloudflare Dashboard -> Pages -> Connect repo, root = karaoke-buddy/,
+#      build command = (empty), output = .  -> set WORKER_URL in app.js if domains differ

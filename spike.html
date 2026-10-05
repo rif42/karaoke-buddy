@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Karaoke Buddy — Spotify spike test</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; background: #121016; color: #f4f1fa; margin: 0; }
+  main { max-width: 640px; margin: 0 auto; padding: 24px 16px 48px; }
+  input { width: 100%; background: #100e14; color: #fff; border: 1px solid #38324a;
+          border-radius: 10px; padding: 12px; font-size: .95rem; margin: 6px 0; box-sizing: border-box; }
+  button { background: #8b5cf6; color: #fff; border: 0; border-radius: 10px;
+           padding: 14px; font-size: 1.05rem; font-weight: 700; width: 100%; cursor: pointer; margin-top: 10px; }
+  button:disabled { opacity: .5; }
+  pre { background: #100e14; border: 1px solid #38324a; border-radius: 10px; padding: 12px;
+        overflow-x: auto; font-size: .8rem; white-space: pre-wrap; }
+  .step { margin: 12px 0; padding: 10px 12px; border-radius: 10px; background: #1c1922; }
+  .pass { border-left: 5px solid #34d399; } .fail { border-left: 5px solid #f87171; }
+  .warn { border-left: 5px solid #fbbf24; } .run { border-left: 5px solid #8b5cf6; }
+  .verdict { font-size: 1.2rem; font-weight: 800; margin-top: 16px; }
+  .hint { color: #a79fb8; font-size: .85rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>🎤 Karaoke Buddy — spike test</h1>
+  <p class="hint">Runs the full chain in your browser: Worker → Spotify token → someone else's public playlist. Nothing is stored.</p>
+  <label>Worker URL (from <code>wrangler deploy</code>)</label>
+  <input id="worker" placeholder="https://karaoke-buddy.YOU.workers.dev" />
+  <label>Someone ELSE's public playlist URL (not one you created)</label>
+  <input id="playlist" value="https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M" />
+  <button id="go">▶ Run spike test</button>
+  <div id="log"></div>
+  <div id="verdict" class="verdict"></div>
+  <p class="hint">Copy everything below and send it back.</p>
+  <pre id="raw">…waiting…</pre>
+</main>
+<script>
+var $ = function (id) { return document.getElementById(id); };
+function step(cls, html) {
+  var d = document.createElement("div");
+  d.className = "step " + cls; d.innerHTML = html;
+  $("log").appendChild(d); return d;
+}
+function say(obj) { $("raw").textContent += "\n" + JSON.stringify(obj, null, 1); }
+$("go").onclick = async function () {
+  $("log").innerHTML = ""; $("raw").textContent = ""; $("verdict").textContent = "";
+  this.disabled = true;
+  var W = $("worker").value.trim().replace(/\/+$/, "");
+  var pl = $("playlist").value.trim();
+  var out = { worker: W, playlist: pl, steps: {} };
+  try {
+    // 1. health
+    var s1 = step("run", "① GET / — worker alive?");
+    var h = await fetch(W + "/").then(function (r) { return r.json(); });
+    out.steps.health = h;
+    s1.className = "step pass"; s1.innerHTML += "<br>✅ " + (h.service || "ok"); say({ health: h });
+
+    // 2. create room
+    var s2 = step("run", "② POST /api/rooms — create room…");
+    var room = await fetch(W + "/api/rooms", { method: "POST" }).then(function (r) { return r.json(); });
+    out.steps.room = room;
+    if (!room.code) throw new Error("Room creation failed: " + JSON.stringify(room));
+    s2.className = "step pass"; s2.innerHTML += "<br>✅ room <b>" + room.code + "</b>"; say({ room: room });
+
+    // 3. add foreign playlist (THE test)
+    var s3 = step("run", "③ POST /api/rooms/" + room.code + "/playlists — add OTHER person's playlist…");
+    var resp = await fetch(W + "/api/rooms/" + room.code + "/playlists", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ playlistUrl: pl })
+    });
+    var added = await resp.json();
+    out.steps.addPlaylist = { http: resp.status, body: added };
+    say({ addPlaylist: out.steps.addPlaylist });
+    if (!resp.ok) {
+      s3.className = "step fail";
+      s3.innerHTML += "<br>❌ HTTP " + resp.status + ": " + (added.message || added.code);
+      verdict("red", "🔴 HTTP " + resp.status + " — " + interpret(resp.status, added));
+      out.verdict = "red-" + resp.status; say({ verdict: out.verdict });
+      this.disabled = false; return;
+    }
+    s3.className = "step pass";
+    s3.innerHTML += "<br>✅ <b>" + added.name + "</b> — " + added.trackCount + " tracks" +
+      (added.endpointUsed ? " (via <code>/" + added.endpointUsed + "</code>)" : "");
+
+    // 4. results: check popularity field
+    var s4 = step("run", "④ GET results — is `popularity` present?");
+    var res = await fetch(W + "/api/rooms/" + room.code + "/results").then(function (r) { return r.json(); });
+    var tracks = (((res.snapshots || [])[0] || {}).tracks || []).slice(0, 3);
+    var pops = tracks.map(function (t) { return t.popularity; });
+    var hasPop = pops.some(function (p) { return p > 0; });
+    out.steps.popularitySample = pops; out.steps.hasPopularity = hasPop;
+    say({ popularitySample: pops, hasPopularity: hasPop });
+    if (hasPop) {
+      s4.className = "step pass"; s4.innerHTML += "<br>✅ popularity present: [" + pops.join(", ") + "]";
+      verdict("green", "🟢 FULL GREEN — app-token reads work, fields intact. Build as-is.");
+      out.verdict = "green";
+    } else {
+      s4.className = "step warn"; s4.innerHTML += "<br>⚠️ popularity missing/zero";
+      verdict("yellow", "🟡 READS WORK, popularity stripped — needs the ranking fallback. Still buildable.");
+      out.verdict = "yellow-no-popularity";
+    }
+    say({ verdict: out.verdict });
+
+    // 5. cleanup
+    await fetch(W + "/api/rooms/" + room.code, { method: "DELETE" });
+    step("pass", "⑤ Room deleted (cleanup).");
+  } catch (e) {
+    step("fail", "❌ " + e.message);
+    say({ error: String(e && e.stack || e) });
+    verdict("red", "🔴 FAILED: " + e.message + " — send this back.");
+  }
+  this.disabled = false;
+};
+function verdict(color, text) {
+  var v = $("verdict"); v.textContent = text;
+  v.style.color = color === "green" ? "#34d399" : color === "yellow" ? "#fbbf24" : "#f87171";
+}
+function interpret(status, body) {
+  body = body || {};
+  var detail = " [spotifyStatus=" + (body.spotifyStatus != null ? body.spotifyStatus : "?") +
+    " path=" + (body.path || "?") + "]";
+  if (body.fallbackFrom) detail += " (also tried " + body.fallbackFrom.path +
+    " → " + body.fallbackFrom.spotifyStatus + ")";
+  // Both endpoint names 404 = the playlist itself is unreachable (private/missing/blocked).
+  // Only ONE 404s = endpoint rename, and the worker already handled it (you wouldn't see this).
+  if (body.spotifyStatus === 404 && body.fallbackFrom && body.fallbackFrom.spotifyStatus === 404)
+    return "BOTH /items and /tracks 404 → the playlist itself is unreachable to your app token (private, deleted, region-locked, or others'-playlists blocked)." + detail + " → next: retry with YOUR OWN public playlist to split 'blocked-for-others' from 'broken-for-all'.";
+  if (body && /token failed/i.test(body.message || "")) return "app-level gate (secret / Premium owner) — check Spotify dashboard first." + detail;
+  return (body.message || "unknown") + detail + " — send raw output back.";
+}
+</script>
+</body>
+</html>

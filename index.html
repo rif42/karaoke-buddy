@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Karaoke Consensus — find songs everyone knows</title>
+  <meta name="description" content="Paste up to 5 Spotify playlists, see which songs everyone knows. Built for karaoke night." />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main id="app" class="wrap">
+    <header class="hero">
+      <h1>🎤 Karaoke Buddy 🎤</h1>
+      <p class="sub">Find the songs <strong>everyone</strong> knows. No login, no install. just choose and sing</p>
+    </header>
+
+    <!-- LANDING: start room or join with code -->
+    <section id="view-landing" class="card">
+      <button id="btn-start" class="btn primary big">Start a room</button>
+      <div class="divider"><span>or join with code</span></div>
+      <form id="form-join" class="row">
+        <input id="input-code" class="input code" inputmode="text" autocomplete="off"
+               placeholder="KTV-4821" maxlength="8" aria-label="Room code" />
+        <button type="submit" class="btn">Join</button>
+      </form>
+      <p class="hint">Rooms live ~4 hours. Nothing is stored about you.</p>
+    </section>
+
+    <!-- HOST: room code + QR + slots + results -->
+    <section id="view-host" class="card hidden">
+      <div class="room-head">
+        <div>
+          <div class="label">Room code</div>
+          <div id="room-code" class="code big">—</div>
+        </div>
+        <div class="room-actions">
+          <button id="btn-copy-link" class="btn small">Copy invite link</button>
+          <button id="btn-close-room" class="btn small danger">Close room</button>
+        </div>
+      </div>
+      <canvas id="qr" class="qr" width="160" height="160" aria-label="Room QR code"></canvas>
+      <p class="hint">Guests scan the QR or open the invite link, then paste their playlist.</p>
+
+      <h2>Playlists <span id="slot-count" class="muted">(0/5)</span></h2>
+      <ul id="slots" class="slots"></ul>
+
+      <details class="fallback">
+        <summary>Add a playlist on this phone (pass-the-phone)</summary>
+        <form id="form-host-paste" class="row">
+          <input id="input-host-link" class="input" inputmode="url" autocomplete="off"
+                 placeholder="Paste Spotify playlist link…" aria-label="Spotify playlist link" />
+          <button type="submit" class="btn">Add</button>
+        </form>
+        <button id="btn-clipboard" class="btn small">📋 Paste from clipboard</button>
+      </details>
+
+      <button id="btn-compute" class="btn primary big" disabled>Find common songs</button>
+
+      <!-- LEAN SPIKE: playlist URL -> song list. No rooms, no matching. -->
+      <details class="fallback" id="browse-box" open>
+        <summary>Spike: playlist URL → songs</summary>
+        <form id="form-browse" class="row">
+          <input id="input-browse-link" class="input" inputmode="url" autocomplete="off"
+                 value="https://open.spotify.com/playlist/4RiOBZIhsahgJrFMcivXwL"
+                 aria-label="Playlist link to test" />
+          <button type="submit" class="btn">Go</button>
+        </form>
+        <p id="browse-meta" class="hint"></p>
+        <div id="browse-list"></div>
+      </details>
+
+      <div id="results" class="results hidden">
+        <h2>Sing together 🎶</h2>
+        <p id="summary" class="summary"></p>
+        <div id="groups"></div>
+        <button id="btn-copy-queue" class="btn">Copy queue as text</button>
+        <p id="copy-ok" class="ok hidden">Copied — paste it into the KTV search!</p>
+      </div>
+      <p id="host-error" class="err" role="alert" aria-live="polite"></p>
+    </section>
+
+    <!-- GUEST: one input -->
+    <section id="view-guest" class="card hidden">
+      <p class="label">You're joining room</p>
+      <div id="guest-code" class="code big">—</div>
+
+      <!-- Step 1: connect Spotify (Plan B — per-guest OAuth) -->
+      <div id="guest-connect-box">
+        <p class="hint">Connect Spotify so the room can read <strong>your</strong> playlists (we never touch anything else).</p>
+        <button id="btn-connect" class="btn primary big">Connect Spotify</button>
+      </div>
+
+      <!-- Step 2: pick one of YOUR playlists -->
+      <div id="guest-pick-box" class="hidden">
+        <p class="hint">Pick one of your playlists to submit<span id="guest-name"></span>:</p>
+        <ul id="guest-playlists" class="slots"></ul>
+        <details class="howto">
+          <summary>Or paste a link instead</summary>
+          <form id="form-guest" class="row">
+            <input id="input-guest-link" class="input" inputmode="url" autocomplete="off"
+                   placeholder="Spotify playlist link…" aria-label="Your Spotify playlist link" />
+            <button type="submit" class="btn">Add</button>
+          </form>
+        </details>
+      </div>
+
+      <p id="guest-ok" class="ok hidden">You're in! You can close this page. 🎉</p>
+      <p id="guest-error" class="err" role="alert" aria-live="polite"></p>
+    </section>
+  </main>
+
+  <footer class="foot muted">Made by Rifky Ariya Pratama | rifkyariya42@gmail.com</footer>
+  <script src="app.js"></script>
+</body>
+</html>
