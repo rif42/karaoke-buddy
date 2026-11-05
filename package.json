@@ -4,7 +4,7 @@
   "private": true,
   "type": "commonjs",
   "scripts": {
-    "test": "node --test tests/main-user-story.test.js tests/real-playlists.test.js tests/browser-scrape.test.js",
+    "test": "node --test tests/main-user-story.test.js tests/real-playlists.test.js tests/browser-scrape.test.js tests/scraper-step.test.js",
     "record-fixtures": "node tests/record-fixtures.js"
   },
   "devDependencies": {

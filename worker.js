@@ -297,6 +297,37 @@ async function putCachedPage(pid, env, page) {
   } catch (ign) { /* cache is best-effort */ }
 }
 
+/* ---- Clean-host scraper client (scrape-server.js on non-flagged egress).
+ * Trust-but-verify: only id/title/artists cross the boundary; entries are
+ * re-validated here, so a compromised or buggy server cannot inject shapes
+ * the matcher doesn't understand. */
+async function fetchFromScraper(pid, env) {
+  var base = String(env.SCRAPER_URL).replace(/\/+$/, "");
+  var headers = {};
+  if (env.SCRAPER_SECRET) headers["Authorization"] = "Bearer " + env.SCRAPER_SECRET;
+  var r = await fetch(base + "/scrape?pid=" + encodeURIComponent(pid),
+    { headers: headers, signal: AbortSignal.timeout(25000) });
+  if (!r.ok) {
+    var he = new Error("Scraper HTTP " + r.status);
+    he.code = "SCRAPER_HTTP"; throw he;
+  }
+  var j = await r.json().catch(function () { return null; });
+  if (!j || !Array.isArray(j.tracks)) {
+    var se = new Error("Scraper bad shape");
+    se.code = "SCRAPER_SHAPE"; throw se;
+  }
+  var tracks = [];
+  j.tracks.forEach(function (t) {
+    if (!t || !/^[A-Za-z0-9]{22}$/.test(t.id || "") || !t.title) return;
+    tracks.push({ id: t.id, isrc: null, title: String(t.title),
+      artists: Array.isArray(t.artists)
+        ? t.artists.filter(function (a) { return typeof a === "string" && a; }).slice(0, 2)
+        : [],
+      popularity: 0, durationMs: 0, image: null, explicit: false, via: "scraper" });
+  });
+  return { name: (j.name || null), owner: (j.owner || null), tracks: tracks };
+}
+
 /* ---- XHR payload extraction (pure, unit-tested). ----
  * The web player downloads track JSON (api.spotify.com or spclient) before
  * rendering rows. Any captured JSON holding track-shaped entries is usable,
@@ -629,10 +660,10 @@ export default {
       }
       // POST /api/rooms/:code/playlists { playlistUrl } or { playlistId }
       //   + optional { guest } -> fetch with THAT guest's user token (private lists).
-      // FETCH ORDER v1.8 (cache -> curl scrape -> browser XHR-intercept):
-      // KV page cache first (one fetch/render serves every room), public page
-      // scrape PRIMARY (no auth, no browser minutes), Browser Run XHR-intercept
-      // fallback when curl gets the bot shell. API enrichment stays best-effort.
+      // FETCH ORDER v1.9 (cache -> scraper -> curl -> browser XHR-intercept):
+      // KV page cache first; clean-host scraper when SCRAPER_URL is set (no auth,
+      // non-flagged egress); public page scrape PRIMARY fallback (no browser
+      // minutes); Browser Run XHR-intercept last resort. Enrichment best-effort.
       if (req.method === "POST" && m[2] === "/playlists") {
         if (room.slots.length >= MAX_PLAYLISTS) return err("ROOM_FULL", "Room is full (" + MAX_PLAYLISTS + "). Remove one first.", 409);
         var body = await req.json().catch(function () { return {}; });
@@ -655,7 +686,21 @@ export default {
             endpointUsed: null, shapeUsed: cached.shape || "scrape", itemsAbsent: false,
             metaTotal: cached.tracks.length, pageShape: cached.shape || "scrape" };
         }
-        // 1) CURL SCRAPE (no auth, no browser minutes).
+        // 1) CLEAN-HOST SCRAPER (no auth; needs SCRAPER_URL + SCRAPER_SECRET).
+        if (!snap && env.SCRAPER_URL) {
+          try {
+            var scraped2 = await fetchFromScraper(pid, env);
+            if (scraped2.tracks.length) {
+              snap = { playlistId: pid, name: scraped2.name, owner: scraped2.owner, image: null,
+                trackCount: scraped2.tracks.length, capped: scraped2.tracks.length >= 600,
+                tracks: scraped2.tracks, via: "scraper",
+                endpointUsed: null, shapeUsed: "scrape", itemsAbsent: false,
+                metaTotal: scraped2.tracks.length, pageShape: "scrape" };
+              await putCachedPage(pid, env, { name: scraped2.name, owner: scraped2.owner, tracks: scraped2.tracks, shape: "scraper" });
+            }
+          } catch (se2) { scrapeErr = (scrapeErr ? scrapeErr + " | " : "") + se2.message; }
+        }
+        // 2) CURL SCRAPE (no auth, no browser minutes).
         if (!snap) {
           try {
             var scraped = await scrapePlaylistPage(pid);
@@ -669,7 +714,7 @@ export default {
             }
           } catch (se) { scrapeErr = se.message; }
         }
-        // 2) BROWSER XHR-INTERCEPT (no auth; costs browser minutes, cached above).
+        // 3) BROWSER XHR-INTERCEPT (no auth; costs browser minutes, cached above).
         if (!snap && env.BROWSER) {
           try {
             var browsed = await scrapeViaBrowser(pid, env);
@@ -683,7 +728,7 @@ export default {
             }
           } catch (be) { scrapeErr = (scrapeErr ? scrapeErr + " | " : "") + be.message; }
         }
-        // 3) API ENRICHMENT (only when a token path exists; best-effort, never fatal).
+        // 4) API ENRICHMENT (only when a token path exists; best-effort, never fatal).
         if (snap && (gTok || env.SPOTIFY_CLIENT_ID)) {
           try {
             var api = await fetchPlaylist(pid, env, gTok);
@@ -701,7 +746,7 @@ export default {
             }
           } catch (ign) { /* enrichment is best-effort; scraped data stands */ }
         }
-        // 4) Guest-token API path (private lists): scrape fails on private pages,
+        // 5) Guest-token API path (private lists): scrape fails on private pages,
         // so try the API with the guest token directly.
         if (!snap && gTok) {
           try {

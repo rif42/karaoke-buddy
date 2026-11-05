@@ -76,3 +76,15 @@ Page scraping is read-only, 1 fetch per playlist, no credentials abused — but 
 sits in Spotify ToS gray area (their API terms prefer API use). Risk profile for
 a personal party tool at low volume: low. If Spotify blocks worker-IP page
 fetches, the app degrades to API paths (owned lists + OAuth) automatically.
+
+## 9. Scrape microservice (optional, needs clean egress)
+Spotify walls Cloudflare IPs on every no-login path (curl, fleet browser,
+embed, app-token track reads). If guests must stay login-free, run the
+scraper where Spotify serves full pages (home box, clean VPS):
+  SCRAPER_SECRET=$(openssl rand -hex 32) PORT=8787 node scrape-server.js
+  cloudflared tunnel --url http://localhost:8787   # note the https URL
+  wrangler secret put SCRAPER_SECRET                # same value as server env
+  # wrangler.toml: SCRAPER_URL = "https://<tunnel-host>" (empty = disabled)
+  wrangler deploy
+The worker tries cache -> scraper -> curl -> browser; scraped pages cache
+24h in KV, so one render serves every room.

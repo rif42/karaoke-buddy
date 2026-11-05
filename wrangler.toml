@@ -14,6 +14,9 @@ id = "63697454046f49df9899a59f7bb1bc59"
 binding = "BROWSER"
 
 [vars]
+# Clean-host scrape microservice (scrape-server.js). Empty = disabled.
+# The host must have non-flagged egress. Secret: wrangler secret put SCRAPER_SECRET
+SCRAPER_URL = ""
 # Public Pages origin allowed to call the worker (tighten after deploy).
 # The worker itself always returns Access-Control-Allow-Origin: * (party phones = any origin).
 MAX_PLAYLISTS = "5"
