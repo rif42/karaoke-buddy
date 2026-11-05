@@ -353,6 +353,7 @@ function browsePlaylist(link) {
 }
 
 /* ---------- boot ---------- */
+if (typeof document !== "undefined") {
 document.addEventListener("DOMContentLoaded", function () {
   var m = /[?&]room=([A-Za-z0-9-]+)/.exec(location.search);
   var gm = /[?&]guest=([A-Za-z0-9_-]+)/.exec(location.search);
@@ -411,3 +412,4 @@ document.addEventListener("DOMContentLoaded", function () {
     else { window.prompt("Copy queue:", lines.join("\n")); done(); }
   };
 });
+}

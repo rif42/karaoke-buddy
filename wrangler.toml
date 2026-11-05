@@ -10,6 +10,10 @@ preview_urls = false
 binding = "ROOMS"
 id = "63697454046f49df9899a59f7bb1bc59"
 
+# Browser Run: headless Chromium for the XHR-intercept scrape fallback.
+# Free: 10 browser-min/day; Paid: 10 h/mo, then usage. Omit if unused.
+browser = [{ binding = "BROWSER" }]
+
 [vars]
 # Public Pages origin allowed to call the worker (tighten after deploy).
 # The worker itself always returns Access-Control-Allow-Origin: * (party phones = any origin).

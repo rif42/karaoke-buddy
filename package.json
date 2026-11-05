@@ -1,0 +1,13 @@
+{
+  "name": "karaoke-buddy",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test tests/main-user-story.test.js tests/real-playlists.test.js tests/browser-scrape.test.js",
+    "record-fixtures": "node tests/record-fixtures.js"
+  },
+  "devDependencies": {
+    "@cloudflare/puppeteer": "^1.4.0"
+  }
+}

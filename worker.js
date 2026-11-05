@@ -282,6 +282,180 @@ async function scrapePlaylistPage(pid) {
   return { name: name, tracks: tracks };
 }
 
+/* ---- KV page cache (cross-room). One fetch/render serves every room. ---- */
+var PAGE_CACHE_TTL = 86400; // 24h
+async function getCachedPage(pid, env) {
+  try {
+    var c = await env.ROOMS.get("page:v1:" + pid, { type: "json" });
+    if (c && Array.isArray(c.tracks) && c.tracks.length) return c;
+  } catch (ign) {}
+  return null;
+}
+async function putCachedPage(pid, env, page) {
+  try {
+    await env.ROOMS.put("page:v1:" + pid, JSON.stringify(page), { expirationTtl: PAGE_CACHE_TTL });
+  } catch (ign) { /* cache is best-effort */ }
+}
+
+/* ---- XHR payload extraction (pure, unit-tested). ----
+ * The web player downloads track JSON (api.spotify.com or spclient) before
+ * rendering rows. Any captured JSON holding track-shaped entries is usable,
+ * whatever the endpoint or envelope: wrapped ({track}/{item}), or bare
+ * entries carrying an artists array or duration. Ids are 22-char, so bare
+ * artist lists can never false-positive. Largest candidate wins. */
+function trackFromEntry(t) {
+  if (!t || typeof t !== "object") return null;
+  var wrapped = null;
+  if (t.item && typeof t.item === "object") wrapped = t.item;
+  else if (t.track && typeof t.track === "object") wrapped = t.track;
+  var inner = wrapped || t;
+  if (!inner || typeof inner !== "object") return null;
+  var id = typeof inner.id === "string" ? inner.id : null;
+  var title = typeof inner.name === "string" ? inner.name
+    : (typeof inner.title === "string" ? inner.title : null);
+  if (!id || !/^[A-Za-z0-9]{22}$/.test(id) || !title) return null;
+  if (!wrapped && !Array.isArray(inner.artists) &&
+      typeof inner.duration_ms !== "number" && typeof inner.duration !== "number") return null;
+  var artists = Array.isArray(inner.artists)
+    ? inner.artists.map(function (a) { return (a && typeof a === "object" && a.name) || a; })
+      .filter(function (a) { return typeof a === "string" && a; })
+    : [];
+  return { id: id, isrc: null, title: title, artists: artists, popularity: 0,
+    durationMs: typeof inner.duration_ms === "number" ? inner.duration_ms : 0,
+    image: null, explicit: !!inner.explicit, via: "browser" };
+}
+function extractTracksFromJson(node) {
+  var best = [];
+  function scoreList(arr) {
+    var got = [];
+    for (var i = 0; i < arr.length; i++) {
+      var t = trackFromEntry(arr[i]);
+      if (t) got.push(t);
+    }
+    return got.length >= Math.max(1, Math.floor(arr.length / 2)) ? got : null;
+  }
+  function walk(x) {
+    if (!x || typeof x !== "object") return;
+    if (Array.isArray(x)) {
+      var got = x.length ? scoreList(x) : null;
+      if (got && got.length > best.length) best = got;
+      for (var i = 0; i < x.length; i++) walk(x[i]);
+      return;
+    }
+    var keys = Object.keys(x);
+    for (var j = 0; j < keys.length; j++) walk(x[keys[j]]);
+  }
+  walk(node);
+  var seen = {}, out = [];
+  best.forEach(function (t) { if (!seen[t.id]) { seen[t.id] = true; out.push(t); } });
+  return out;
+}
+
+/* ---- Browser XHR-intercept scrape (fallback when curl gets the bot shell).
+ * Needs the BROWSER binding (Browser Run). Captures the player's own track
+ * JSON over XHR instead of scrolling the virtualized list: one page load,
+ * zero scroll round-trips. Images/media/fonts never download. A bounded DOM
+ * scroll-collect is the backstop if no XHR payload parses. */
+async function scrapeViaBrowser(pid, env) {
+  var mod;
+  try {
+    mod = await import("@cloudflare/puppeteer");
+  } catch (e) {
+    var nde = new Error("Browser dependency missing (npm i -D @cloudflare/puppeteer).");
+    nde.code = "NO_BROWSER_DEP"; throw nde;
+  }
+  var puppeteer = mod.default || mod;
+  var browser = await puppeteer.launch(env.BROWSER);
+  try {
+    var page = await browser.newPage();
+    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36");
+    await page.setRequestInterception(true);
+    page.on("request", function (req) {
+      var t = "unknown";
+      try { t = req.resourceType(); } catch (ign) {}
+      if (t === "image" || t === "media" || t === "font") req.abort();
+      else req.continue();
+    });
+    var payloads = [];
+    page.on("response", function (res) {
+      var url = "";
+      try { url = res.url(); } catch (ign) { return; }
+      if (url.indexOf("spotify.com") === -1) return;
+      if (!/playlist|track|collection/i.test(url)) return;
+      res.json().then(function (j) { if (j) payloads.push(j); }).catch(function () {});
+    });
+    await page.goto("https://open.spotify.com/playlist/" + pid,
+      { waitUntil: "networkidle0", timeout: 25000 });
+    await page.waitForSelector("[data-testid='tracklist-row']", { timeout: 20000 });
+    await new Promise(function (r) { setTimeout(r, 2500); }); // let trailing XHR land
+    var best = [];
+    payloads.forEach(function (p) {
+      var got = extractTracksFromJson(p);
+      if (got.length > best.length) best = got;
+    });
+    var pageTitle = "";
+    try { pageTitle = await page.title(); } catch (ign) {}
+    var nm = pageTitle.match(/^(.*?)(?: - playlist by (.*?))?(?: \| Spotify)?$/);
+    var bName = (nm && nm[1] ? nm[1].trim() : null) || null;
+    var bOwner = (nm && nm[2] ? nm[2].trim() : null);
+    if (!best.length) best = await domScrollCollect(page);
+    return { name: bName, owner: bOwner, tracks: best };
+  } finally {
+    await browser.close();
+  }
+}
+
+/* Bounded DOM scroll-collect (recycling-safe accumulate). Serializes through
+ * JSON because evaluate results must cross the protocol boundary as data. */
+async function domScrollCollect(page) {
+  var raw = await page.evaluate([
+    "async function __kcCollect() {",
+    "  var seen = {};",
+    "  var last = null, stable = 0;",
+    "  for (var i = 0; i < 40 && stable < 3; i++) {",
+    "    var all = document.querySelectorAll(\"[data-testid='tracklist-row']\");",
+    "    for (var j = 0; j < all.length; j++) {",
+    "      var links = all[j].getElementsByTagName('a');",
+    "      var t = null, arts = [];",
+    "      for (var k = 0; k < links.length; k++) {",
+    "        var h = links[k].getAttribute('href') || '';",
+    "        if (!t && h.indexOf('/track/') === 0) t = links[k];",
+    "        else if (h.indexOf('/artist/') === 0) arts.push(links[k].textContent.trim());",
+    "      }",
+    "      if (!t) continue;",
+    "      var m = (t.getAttribute('href') || '').match(/\\/track\\/([A-Za-z0-9]{22})/);",
+    "      if (m && !seen[m[1]]) seen[m[1]] = { id: m[1], title: t.textContent.trim(), artists: arts.filter(Boolean).slice(0, 2) };",
+    "    }",
+    "    var rows = document.querySelectorAll(\"[data-testid='tracklist-row']\");",
+    "    var lastEl = rows[rows.length - 1];",
+    "    var lm = null;",
+    "    if (lastEl) {",
+    "      lastEl.scrollIntoView({ block: 'end' });",
+    "      var llinks = lastEl.getElementsByTagName('a');",
+    "      for (var k2 = 0; k2 < llinks.length && !lm; k2++) {",
+    "        lm = (llinks[k2].getAttribute('href') || '').match(/\\/track\\/([A-Za-z0-9]{22})/);",
+    "      }",
+    "    }",
+    "    var lastId = (lm && lm[1]) || null;",
+    "    if (lastId === last) stable++; else { stable = 0; last = lastId; }",
+    "    await new Promise(function (r) { setTimeout(r, 500); });",
+    "  }",
+    "  return JSON.stringify({ tracks: Object.keys(seen).map(function (k) { return seen[k]; }) });",
+    "}",
+    "return __kcCollect();"
+  ].join("\n"));
+  var parsed = JSON.parse(raw);
+  var out = [];
+  (parsed.tracks || []).forEach(function (t) {
+    if (t && /^[A-Za-z0-9]{22}$/.test(t.id || "")) {
+      out.push({ id: t.id, isrc: null, title: t.title || "Unknown",
+        artists: Array.isArray(t.artists) ? t.artists : [],
+        popularity: 0, durationMs: 0, image: null, explicit: false, via: "browser" });
+    }
+  });
+  return out;
+}
+
 /* ---- router ---- */
 export default {
   async fetch(req, env) {
@@ -447,9 +621,10 @@ export default {
       }
       // POST /api/rooms/:code/playlists { playlistUrl } or { playlistId }
       //   + optional { guest } -> fetch with THAT guest's user token (private lists).
-      // FETCH ORDER v1.7 (scrape-first): public page scrape PRIMARY (no auth,
-      // works for ANY public playlist); API tried only to ENRICH (ISRC/art/
-      // duration) when a usable token exists (guest token, else app token).
+      // FETCH ORDER v1.8 (cache -> curl scrape -> browser XHR-intercept):
+      // KV page cache first (one fetch/render serves every room), public page
+      // scrape PRIMARY (no auth, no browser minutes), Browser Run XHR-intercept
+      // fallback when curl gets the bot shell. API enrichment stays best-effort.
       if (req.method === "POST" && m[2] === "/playlists") {
         if (room.slots.length >= MAX_PLAYLISTS) return err("ROOM_FULL", "Room is full (" + MAX_PLAYLISTS + "). Remove one first.", 409);
         var body = await req.json().catch(function () { return {}; });
@@ -462,19 +637,45 @@ export default {
           var ggRaw = await env.ROOMS.get("guest:" + m[1].toUpperCase() + ":" + body.guest);
           if (ggRaw) { var gg = JSON.parse(ggRaw); gTok = gg.token; gName = gg.name; }
         }
-        // 1) SCRAPE FIRST (no auth).
         var snap = null, scrapeErr = null;
-        try {
-          var scraped = await scrapePlaylistPage(pid);
-          if (scraped.tracks.length) {
-            snap = { playlistId: pid, name: scraped.name, owner: null, image: null,
-              trackCount: scraped.tracks.length, capped: scraped.tracks.length >= 600,
-              tracks: scraped.tracks, via: "scrape",
-              endpointUsed: null, shapeUsed: "scrape", itemsAbsent: false,
-              metaTotal: scraped.tracks.length, pageShape: "scrape" };
-          }
-        } catch (se) { scrapeErr = se.message; }
-        // 2) API ENRICHMENT (only when a token path exists; best-effort, never fatal).
+        // 0) KV PAGE CACHE (cross-room): the fastest scrape is the one skipped.
+        var cached = await getCachedPage(pid, env);
+        if (cached && cached.tracks.length) {
+          snap = { playlistId: pid, name: cached.name, owner: cached.owner || null, image: null,
+            trackCount: cached.tracks.length, capped: cached.tracks.length >= 600,
+            tracks: cached.tracks, via: "cache",
+            endpointUsed: null, shapeUsed: cached.shape || "scrape", itemsAbsent: false,
+            metaTotal: cached.tracks.length, pageShape: cached.shape || "scrape" };
+        }
+        // 1) CURL SCRAPE (no auth, no browser minutes).
+        if (!snap) {
+          try {
+            var scraped = await scrapePlaylistPage(pid);
+            if (scraped.tracks.length) {
+              snap = { playlistId: pid, name: scraped.name, owner: null, image: null,
+                trackCount: scraped.tracks.length, capped: scraped.tracks.length >= 600,
+                tracks: scraped.tracks, via: "scrape",
+                endpointUsed: null, shapeUsed: "scrape", itemsAbsent: false,
+                metaTotal: scraped.tracks.length, pageShape: "scrape" };
+              await putCachedPage(pid, env, { name: scraped.name, owner: null, tracks: scraped.tracks, shape: "scrape" });
+            }
+          } catch (se) { scrapeErr = se.message; }
+        }
+        // 2) BROWSER XHR-INTERCEPT (no auth; costs browser minutes, cached above).
+        if (!snap && env.BROWSER) {
+          try {
+            var browsed = await scrapeViaBrowser(pid, env);
+            if (browsed.tracks.length) {
+              snap = { playlistId: pid, name: browsed.name, owner: browsed.owner, image: null,
+                trackCount: browsed.tracks.length, capped: browsed.tracks.length >= 600,
+                tracks: browsed.tracks, via: "browser-xhr",
+                endpointUsed: null, shapeUsed: "browser", itemsAbsent: false,
+                metaTotal: browsed.tracks.length, pageShape: "browser" };
+              await putCachedPage(pid, env, { name: browsed.name, owner: browsed.owner, tracks: browsed.tracks, shape: "browser" });
+            }
+          } catch (be) { scrapeErr = (scrapeErr ? scrapeErr + " | " : "") + be.message; }
+        }
+        // 3) API ENRICHMENT (only when a token path exists; best-effort, never fatal).
         if (snap && (gTok || env.SPOTIFY_CLIENT_ID)) {
           try {
             var api = await fetchPlaylist(pid, env, gTok);
@@ -492,7 +693,7 @@ export default {
             }
           } catch (ign) { /* enrichment is best-effort; scraped data stands */ }
         }
-        // 3) Guest-token API path (private lists): scrape fails on private pages,
+        // 4) Guest-token API path (private lists): scrape fails on private pages,
         // so try the API with the guest token directly.
         if (!snap && gTok) {
           try {
@@ -537,3 +738,6 @@ export default {
     }
   }
 };
+
+// node export for `node --test` (Worker runtime has no `module`).
+if (typeof module !== "undefined" && module.exports) { module.exports.extractTracksFromJson = extractTracksFromJson; }
