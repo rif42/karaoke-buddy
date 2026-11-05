@@ -385,9 +385,12 @@ async function scrapeViaBrowser(pid, env) {
       res.json().then(function (j) { if (j) payloads.push(j); }).catch(function () {});
     });
     await page.goto("https://open.spotify.com/playlist/" + pid,
-      { waitUntil: "networkidle0", timeout: 25000 });
-    await page.waitForSelector("[data-testid='tracklist-row']", { timeout: 20000 });
-    await new Promise(function (r) { setTimeout(r, 2500); }); // let trailing XHR land
+      { waitUntil: "domcontentloaded", timeout: 25000 });
+    var rowsOk = true;
+    try {
+      await page.waitForSelector("[data-testid='tracklist-row']", { timeout: 20000 });
+    } catch (se) { rowsOk = false; } // rows missing: XHR JSON may still have landed
+    await new Promise(function (r) { setTimeout(r, 1500); }); // let trailing XHR land
     var best = [];
     payloads.forEach(function (p) {
       var got = extractTracksFromJson(p);
@@ -398,7 +401,12 @@ async function scrapeViaBrowser(pid, env) {
     var nm = pageTitle.match(/^(.*?)(?: - playlist by (.*?))?(?: \| Spotify)?$/);
     var bName = (nm && nm[1] ? nm[1].trim() : null) || null;
     var bOwner = (nm && nm[2] ? nm[2].trim() : null);
-    if (!best.length) best = await domScrollCollect(page);
+    if (!best.length && rowsOk) best = await domScrollCollect(page);
+    if (!best.length) {
+      var be = new Error("no track data (title: " + (pageTitle || "?") +
+        ", json payloads: " + payloads.length + ", rows: " + rowsOk + ")");
+      be.code = "NO_TRACK_DATA"; throw be;
+    }
     return { name: bName, owner: bOwner, tracks: best };
   } finally {
     await browser.close();
