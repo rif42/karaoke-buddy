@@ -17,11 +17,25 @@ const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 
 // Mirror of scrapePlaylistPage() in worker.js — keep in sync (same regex,
 // same title rule, same 600-track cap). Returns { name, tracks }.
+/* Rail headings that mark non-playlist content below the tracklist. The rail
+ * title varies ("Recommended", "Fans also like", ...), so cut at the earliest
+ * heading-like match. Track titles can't false-positive: the pattern requires
+ * the words to span a whole element's text. Mirrored in worker.js. */
+var RAIL_HEADINGS = ["recommended", "fans also like", "more of what you like",
+  "you might also like", "you may also like"];
+function cutRail(html) {
+  var best = -1;
+  for (var i = 0; i < RAIL_HEADINGS.length; i++) {
+    var m = html.match(new RegExp(">[^<>]*" + RAIL_HEADINGS[i] + "[^<>]*<", "i"));
+    if (m && (best === -1 || m.index < best)) best = m.index;
+  }
+  return best > 0 ? html.slice(0, best) : html;
+}
+
 function parsePlaylistPage(html) {
   var nameM = html.match(/<title>([^<]*?)(?: - playlist by .*?)?(?: \| Spotify)?<\/title>/i);
   var name = nameM ? nameM[1].trim() : null;
-  var cut = html.search(/Recommended/i);
-  var body = cut > 0 ? html.slice(0, cut) : html;
+  var body = cutRail(html);
   var tracks = [], seen = {};
   var re = /<a[^>]+href="\/track\/([A-Za-z0-9]{22})"[^>]*>([^<]+)<\/a>\s*(?:<[^>]*>)*<a[^>]+href="\/artist\/[A-Za-z0-9]{22}"[^>]*>([^<]+)<\/a>/g;
   var m, guard = 0;

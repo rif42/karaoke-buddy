@@ -228,6 +228,21 @@ async function fetchPlaylist(pid, env, userToken) {
   };
 }
 
+/* Rail headings that mark non-playlist content below the tracklist. The rail
+ * title varies ("Recommended", "Fans also like", ...), so cut at the earliest
+ * heading-like match. Track titles can't false-positive: the pattern requires
+ * the words to span a whole element's text. Mirrored in scrape-server.js. */
+var RAIL_HEADINGS = ["recommended", "fans also like", "more of what you like",
+  "you might also like", "you may also like"];
+function cutRail(html) {
+  var best = -1;
+  for (var i = 0; i < RAIL_HEADINGS.length; i++) {
+    var m = html.match(new RegExp(">[^<>]*" + RAIL_HEADINGS[i] + "[^<>]*<", "i"));
+    if (m && (best === -1 || m.index < best)) best = m.index;
+  }
+  return best > 0 ? html.slice(0, best) : html;
+}
+
 /* ---- Page scrape (PRIMARY for public lists — v1.7 scrape-first).
  * open.spotify.com playlist pages server-render the FULL track list as plain
  * <a href="/track/{id}">Title</a> + artist links. The Worker fetches the page
@@ -237,6 +252,7 @@ async function fetchPlaylist(pid, env, userToken) {
  * 10s timeout. If Spotify changes markup, entries come back short and the
  * caller reports trackCount/metaTotal honestly (never fakes data).
  */
+
 async function scrapePlaylistPage(pid) {
   var ctrl = new AbortController();
   var timer = setTimeout(function () { ctrl.abort(); }, 10000);
@@ -258,11 +274,9 @@ async function scrapePlaylistPage(pid) {
   // 1) Playlist name from <title>.
   var nameM = html.match(/<title>([^<]*?)(?: - playlist by .*?)?(?: \| Spotify)?<\/title>/i);
   var name = nameM ? nameM[1].trim() : null;
-  // 2) Track rows: /track/{22} link (title) followed by /artist/{22} link(s).
-  // Restrict to the main tracklist region to skip "Recommended" footer: cut
-  // everything after the "Recommended" heading when present.
-  var cut = html.search(/Recommended/i);
-  var body = cut > 0 ? html.slice(0, cut) : html;
+  // 2) Track rows: /track/{22} link (title) followed by /artist/{22} link(s),
+  // restricted to the main tracklist region (everything above the rail cut).
+  var body = cutRail(html);
   var tracks = [], seen = {};
   var re = /<a[^>]+href="\/track\/([A-Za-z0-9]{22})"[^>]*>([^<]+)<\/a>\s*(?:<[^>]*>)*<a[^>]+href="\/artist\/[A-Za-z0-9]{22}"[^>]*>([^<]+)<\/a>/g;
   var m, guard = 0;
