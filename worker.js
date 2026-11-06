@@ -282,18 +282,21 @@ async function scrapePlaylistPage(pid) {
   return { name: name, tracks: tracks };
 }
 
-/* ---- KV page cache (cross-room). One fetch/render serves every room. ---- */
+/* ---- KV page cache (cross-room). One fetch/render serves every room.
+ * Namespace is versioned: bump it whenever the reader or parser changes so
+ * stale/poisoned snapshots (e.g. the 16-track sampled shell) die at once. */
+var PAGE_CACHE_NS = "page:v2:";
 var PAGE_CACHE_TTL = 86400; // 24h
 async function getCachedPage(pid, env) {
   try {
-    var c = await env.ROOMS.get("page:v1:" + pid, { type: "json" });
+    var c = await env.ROOMS.get(PAGE_CACHE_NS + pid, { type: "json" });
     if (c && Array.isArray(c.tracks) && c.tracks.length) return c;
   } catch (ign) {}
   return null;
 }
 async function putCachedPage(pid, env, page) {
   try {
-    await env.ROOMS.put("page:v1:" + pid, JSON.stringify(page), { expirationTtl: PAGE_CACHE_TTL });
+    await env.ROOMS.put(PAGE_CACHE_NS + pid, JSON.stringify(page), { expirationTtl: PAGE_CACHE_TTL });
   } catch (ign) { /* cache is best-effort */ }
 }
 
