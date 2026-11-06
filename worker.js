@@ -253,6 +253,17 @@ function cutRail(html) {
  * caller reports trackCount/metaTotal honestly (never fakes data).
  */
 
+/* Playlist total as printed in the page header ("Playlist · 278 songs").
+ * Only a count with "playlist" nearby qualifies; a bare "N songs" elsewhere
+ * (bios, descriptions) must not trigger a false partial flag. Null when the
+ * header is absent (bot shell, markup change). Mirrored in scrape-server.js. */
+function extractTotal(html) {
+  var m = html.match(/playlist[^<>]{0,80}?(\d[\d,]*)\s+songs?/i);
+  if (!m) return null;
+  var n = parseInt(m[1].replace(/,/g, ""), 10);
+  return n > 0 ? n : null;
+}
+
 async function scrapePlaylistPage(pid) {
   var ctrl = new AbortController();
   var timer = setTimeout(function () { ctrl.abort(); }, 10000);
@@ -293,7 +304,7 @@ async function scrapePlaylistPage(pid) {
     tracks.push({ id: tid, isrc: null, title: title, artists: artists,
       popularity: 0, durationMs: 0, image: null, explicit: false, via: "scrape" });
   }
-  return { name: name, tracks: tracks };
+  return { name: name, tracks: tracks, metaTotal: extractTotal(html) };
 }
 
 /* ---- KV page cache (cross-room). One fetch/render serves every room.
@@ -342,7 +353,8 @@ async function fetchFromScraper(pid, env) {
         : [],
       popularity: 0, durationMs: 0, image: null, explicit: false, via: "scraper" });
   });
-  return { name: (j.name || null), owner: (j.owner || null), tracks: tracks };
+  return { name: (j.name || null), owner: (j.owner || null), tracks: tracks,
+    metaTotal: (j && typeof j.metaTotal === "number" && j.metaTotal > 0) ? j.metaTotal : null };
 }
 
 /* ---- XHR payload extraction (pure, unit-tested). ----
@@ -662,7 +674,7 @@ export default {
         var previews = [];
         for (var i = 0; i < room.slots.length; i++) {
           var s = await env.ROOMS.get(roomKey + ":pl:" + i, { type: "json" });
-          if (s) previews.push({ name: s.name, owner: s.owner, image: s.image, trackCount: s.trackCount, playlistId: s.playlistId });
+          if (s) previews.push({ name: s.name, owner: s.owner, image: s.image, trackCount: s.trackCount, playlistId: s.playlistId, metaTotal: s.metaTotal || s.trackCount, partial: !!s.partial });
         }
         return json({ code: room.code, participants: previews });
       }
@@ -701,7 +713,7 @@ export default {
             trackCount: cached.tracks.length, capped: cached.tracks.length >= 600,
             tracks: cached.tracks, via: "cache",
             endpointUsed: null, shapeUsed: cached.shape || "scrape", itemsAbsent: false,
-            metaTotal: cached.tracks.length, pageShape: cached.shape || "scrape" };
+            metaTotal: cached.metaTotal || cached.tracks.length, pageShape: cached.shape || "scrape" };
         }
         // 1) CLEAN-HOST SCRAPER (no auth; needs SCRAPER_URL + SCRAPER_SECRET).
         if (!snap && env.SCRAPER_URL) {
@@ -712,8 +724,8 @@ export default {
                 trackCount: scraped2.tracks.length, capped: scraped2.tracks.length >= 600,
                 tracks: scraped2.tracks, via: "scraper",
                 endpointUsed: null, shapeUsed: "scrape", itemsAbsent: false,
-                metaTotal: scraped2.tracks.length, pageShape: "scrape" };
-              await putCachedPage(pid, env, { name: scraped2.name, owner: scraped2.owner, tracks: scraped2.tracks, shape: "scraper" });
+                metaTotal: scraped2.metaTotal || scraped2.tracks.length, pageShape: "scrape" };
+              await putCachedPage(pid, env, { name: scraped2.name, owner: scraped2.owner, tracks: scraped2.tracks, shape: "scraper", metaTotal: scraped2.metaTotal });
             }
           } catch (se2) { scrapeErr = (scrapeErr ? scrapeErr + " | " : "") + se2.message; }
         }
@@ -726,8 +738,8 @@ export default {
                 trackCount: scraped.tracks.length, capped: scraped.tracks.length >= 600,
                 tracks: scraped.tracks, via: "scrape",
                 endpointUsed: null, shapeUsed: "scrape", itemsAbsent: false,
-                metaTotal: scraped.tracks.length, pageShape: "scrape" };
-              await putCachedPage(pid, env, { name: scraped.name, owner: null, tracks: scraped.tracks, shape: "scrape" });
+                metaTotal: scraped.metaTotal || scraped.tracks.length, pageShape: "scrape" };
+              await putCachedPage(pid, env, { name: scraped.name, owner: null, tracks: scraped.tracks, shape: "scrape", metaTotal: scraped.metaTotal });
             }
           } catch (se) { scrapeErr = se.message; }
         }
@@ -740,8 +752,8 @@ export default {
                 trackCount: browsed.tracks.length, capped: browsed.tracks.length >= 600,
                 tracks: browsed.tracks, via: "browser-xhr",
                 endpointUsed: null, shapeUsed: "browser", itemsAbsent: false,
-                metaTotal: browsed.tracks.length, pageShape: "browser" };
-              await putCachedPage(pid, env, { name: browsed.name, owner: browsed.owner, tracks: browsed.tracks, shape: "browser" });
+                metaTotal: browsed.metaTotal || browsed.tracks.length, pageShape: "browser" };
+              await putCachedPage(pid, env, { name: browsed.name, owner: browsed.owner, tracks: browsed.tracks, shape: "browser", metaTotal: browsed.metaTotal });
             }
           } catch (be) { scrapeErr = (scrapeErr ? scrapeErr + " | " : "") + be.message; }
         }
@@ -778,6 +790,12 @@ export default {
               spotifyStatus: e.spotifyStatus || null }, st2);
           }
         }
+        // Honest counts: the header total (when the page prints one) beats the
+        // parsed row count; a shortfall is flagged partial instead of stated.
+        if (snap) {
+          if (typeof snap.metaTotal !== "number" || !(snap.metaTotal > 0)) snap.metaTotal = snap.trackCount;
+          snap.partial = snap.metaTotal > snap.trackCount;
+        }
         if (!snap || snap.trackCount === 0) {
           return json({ code: "NOT_READABLE",
             message: "Could not read this playlist. If it is public, the page layout may have changed (try again later). If it is private, connect Spotify as a guest first.",
@@ -794,7 +812,7 @@ export default {
             if (tagged) { tagged.submittedBy = gName; await env.ROOMS.put(roomKey + ":pl:" + slot, JSON.stringify(tagged), { expirationTtl: ROOM_TTL }); }
           } catch (ign) {}
         }
-        return json({ participantId: slot, playlistId: pid, name: snap.name, owner: snap.owner, trackCount: snap.trackCount, image: snap.image, capped: snap.capped, endpointUsed: snap.endpointUsed, shapeUsed: snap.shapeUsed, metaTotal: snap.metaTotal, pageShape: snap.pageShape, submittedBy: gName, via: snap.via || "api" });
+        return json({ participantId: slot, playlistId: pid, name: snap.name, owner: snap.owner, trackCount: snap.trackCount, image: snap.image, capped: snap.capped, endpointUsed: snap.endpointUsed, shapeUsed: snap.shapeUsed, metaTotal: snap.metaTotal, partial: !!snap.partial, pageShape: snap.pageShape, submittedBy: gName, via: snap.via || "api" });
       }
       // DELETE /api/rooms/:code -> purge
       if (req.method === "DELETE" && !m[2]) {
@@ -810,4 +828,4 @@ export default {
 };
 
 // node export for `node --test` (Worker runtime has no `module`).
-if (typeof module !== "undefined" && module.exports) { module.exports.extractTracksFromJson = extractTracksFromJson; }
+if (typeof module !== "undefined" && module.exports) { module.exports.extractTracksFromJson = extractTracksFromJson; module.exports.scrapePlaylistPage = scrapePlaylistPage; }

@@ -152,6 +152,13 @@ function renderRoomCode(code) {
   ctx.fillText("or type code", 80, 138);
 }
 
+function trackLabel(p) {
+  if (p.partial && p.metaTotal > p.trackCount) {
+    return p.trackCount + " of ~" + p.metaTotal + " tracks (partial read)";
+  }
+  return p.trackCount + " tracks";
+}
+
 function renderSlots(participants) {
   var ul = $("slots"); ul.innerHTML = "";
   $("slot-count").textContent = "(" + participants.length + "/" + MAX_PLAYLISTS + ")";
@@ -160,7 +167,7 @@ function renderSlots(participants) {
     if (p.image) { var img = el("img"); img.src = p.image; img.alt = ""; li.appendChild(img); }
     var div = el("div");
     div.appendChild(el("div", "who", "Guest " + String.fromCharCode(65 + i)));
-    div.appendChild(el("div", "meta", (p.name || p.playlistId) + " · " + p.trackCount + " tracks"));
+    div.appendChild(el("div", "meta", (p.name || p.playlistId) + " · " + trackLabel(p)));
     li.appendChild(div);
     if (state.isHost) {
       var x = el("button", "x", "✕");
@@ -242,7 +249,8 @@ function computeResults() {
       var snaps = r.snapshots || [];
       // browser cache assist: fill any missing snapshot from localStorage
       var songs = matchPlaylists(snaps.map(function (s) { return s.tracks || []; }));
-      renderResults(songs, snaps.length);
+      var partialNote = snaps.some(function (s) { return s.partial; }) ? "partial read — some lists show fewer songs than they hold" : null;
+      renderResults(songs, snaps.length, partialNote);
       // persist snapshots locally (KV write budget: avoid re-fetch writes on re-runs)
       snaps.forEach(function (s) { if (s.playlistId) store.setSnap(s.playlistId, s.tracks || []); });
     })

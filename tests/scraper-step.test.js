@@ -118,3 +118,56 @@ test("scrape-server parser mirror: parses record-shaped HTML", () => {
   assert.equal(parsed.tracks.length, 2);
   assert.deepEqual(parsed.tracks[0].artists, ["Natalie Imbruglia"]);
 });
+
+test("total: header count extracted, track titles with numbers ignored", () => {
+  const html = `<html><head><title>Mirror Mix - playlist by host | Spotify</title></head><body>` +
+    `<div class="header">Playlist · 278 songs</div>` +
+    pageHtml("Mirror Mix", [
+      { id: T1, title: "10 Songs I Love", artists: ["Counters"] },
+      { id: T2, title: "Creep", artists: ["Radiohead"] },
+    ]).split("<body>")[1];
+  const parsed = parsePlaylistPage(html);
+  assert.equal(parsed.metaTotal, 278);
+  assert.equal(parsed.tracks.length, 2);
+});
+
+test("worker: shortfall against header total is flagged partial", async () => {
+  const { scrapePlaylistPage } = worker;
+  const realFetch = globalThis.fetch;
+  const html = `<html><head><title>Big List - playlist by host | Spotify</title></head><body>` +
+    `<div>Playlist · 278 songs</div>` +
+    pageHtml("Big List", [{ id: T1, title: "Torn", artists: ["Natalie Imbruglia"] }]).split("<body>")[1];
+  globalThis.fetch = async () => new Response(html, { status: 200 });
+  try {
+    const parsed = await scrapePlaylistPage("AAAAAAAAAAAAAAAAAAAAAA");
+    assert.equal(parsed.tracks.length, 1);
+    assert.equal(parsed.metaTotal, 278);
+
+    const env = { ROOMS: makeKV() };
+    globalThis.fetch = async () => new Response(html, { status: 200 });
+    let res = await worker.fetch(req("/api/rooms"), env);
+    const { code } = await res.json();
+    res = await worker.fetch(
+      req(`/api/rooms/${code}/playlists`, {
+        playlistUrl: "https://open.spotify.com/playlist/AAAAAAAAAAAAAAAAAAAAAA",
+      }),
+      env
+    );
+    assert.equal(res.status, 200);
+    const added = await res.json();
+    assert.equal(added.trackCount, 1);
+    assert.equal(added.metaTotal, 278);
+    assert.equal(added.partial, true);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("worker: no header count means full read, no partial flag", async () => {
+  const env = { ROOMS: makeKV() };
+  const html = pageHtml("Small Mix", [{ id: T1, title: "Torn", artists: ["Natalie Imbruglia"] }]);
+  const added = await addVia(env, async () => new Response(html, { status: 200 }), PID);
+  assert.equal(added.status, 200);
+  assert.equal(added.body.metaTotal, 1);
+  assert.equal(added.body.partial, false);
+});

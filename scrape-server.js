@@ -32,6 +32,15 @@ function cutRail(html) {
   return best > 0 ? html.slice(0, best) : html;
 }
 
+/* Playlist total as printed in the page header ("Playlist · 278 songs").
+ * Only a count with "playlist" nearby qualifies. Mirrored in worker.js. */
+function extractTotal(html) {
+  var m = html.match(/playlist[^<>]{0,80}?(\d[\d,]*)\s+songs?/i);
+  if (!m) return null;
+  var n = parseInt(m[1].replace(/,/g, ""), 10);
+  return n > 0 ? n : null;
+}
+
 function parsePlaylistPage(html) {
   var nameM = html.match(/<title>([^<]*?)(?: - playlist by .*?)?(?: \| Spotify)?<\/title>/i);
   var name = nameM ? nameM[1].trim() : null;
@@ -51,7 +60,7 @@ function parsePlaylistPage(html) {
     tracks.push({ id: tid, isrc: null, title: title, artists: artists,
       popularity: 0, durationMs: 0, image: null, explicit: false, via: "scraper" });
   }
-  return { name: name, tracks: tracks };
+  return { name: name, tracks: tracks, metaTotal: extractTotal(html) };
 }
 
 async function fetchPlaylistPage(pid) {
@@ -105,7 +114,7 @@ function start() {
         return send(res, 502, { code: "NO_TRACKS", message: "Page had zero parseable tracks (bot shell?)." });
       }
       send(res, 200, { playlistId: pid, name: parsed.name, owner: null,
-        trackCount: parsed.tracks.length, tracks: parsed.tracks, fetchedAt: Date.now() });
+        trackCount: parsed.tracks.length, tracks: parsed.tracks, metaTotal: parsed.metaTotal, fetchedAt: Date.now() });
     }).catch(function (e) {
       send(res, e.status === 404 ? 404 : 502,
         { code: "FETCH_FAILED", message: e.message || "Playlist fetch failed." });
