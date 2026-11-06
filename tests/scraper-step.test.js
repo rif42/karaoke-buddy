@@ -171,3 +171,42 @@ test("worker: no header count means full read, no partial flag", async () => {
   assert.equal(added.body.metaTotal, 1);
   assert.equal(added.body.partial, false);
 });
+
+test("sampled shell: rail rows dropped, shortfall flagged partial", async () => {
+  // Shape of the real incident: 10 playlist rows, then a 6-row rail under a
+  // non-"Recommended" heading, with a true header total of 278.
+  const row = (id, title) =>
+    `<a href="/track/${id}">${title}</a>` +
+    `<a href="/artist/AAAAAAAAAAAAAAAAAAAAAA">Someone</a>`;
+  const realIds = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "A"].map((c) => c.repeat(22));
+  const railIds = ["B", "C", "D", "E", "F", "0"].map((c) => c.repeat(22));
+  const html = `<html><head><title>Sampled Mix - playlist by host | Spotify</title></head><body>` +
+    `<div class="header">Playlist · 278 songs</div>` +
+    realIds.map((id, i) => row(id, `Real Song ${i}`)).join("") +
+    `<h2>Fans also like</h2>` +
+    railIds.map((id, i) => row(id, `Rail Junk ${i}`)).join("") +
+    `</body></html>`;
+
+  // Server mirror drops the rail and reports the header total.
+  const serverParsed = parsePlaylistPage(html);
+  assert.equal(serverParsed.tracks.length, 10);
+  assert.equal(serverParsed.metaTotal, 278);
+  assert.ok(serverParsed.tracks.every((t) => t.title.startsWith("Real Song")));
+
+  // Worker path: same parse through the room add flow.
+  globalThis.fetch = async () => new Response(html, { status: 200 });
+  try {
+    const workerParsed = await worker.scrapePlaylistPage("FFFFFFFFFFFFFFFFFFFFFF");
+    assert.equal(workerParsed.tracks.length, 10);
+    assert.equal(workerParsed.metaTotal, 278);
+  } finally {
+    globalThis.fetch = undefined;
+  }
+  const env = { ROOMS: makeKV() };
+  const added = await addVia(env, async () => new Response(html, { status: 200 }), "FFFFFFFFFFFFFFFFFFFFFF");
+  assert.equal(added.status, 200);
+  assert.equal(added.body.via, "scrape");
+  assert.equal(added.body.trackCount, 10);
+  assert.equal(added.body.metaTotal, 278);
+  assert.equal(added.body.partial, true);
+});
